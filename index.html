@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>City Roads Poster Generator</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <h1>City Roads Poster Generator</h1>
+        <p>输入地名或地址，一键生成道路地图海报，并下载 PNG / SVG。</p>
+      </header>
+
+      <section class="controls">
+        <div class="row">
+          <input id="queryInput" type="text" placeholder="例如：福州、长乐、洛阳、上海外滩" />
+          <button id="generateBtn">生成地图</button>
+        </div>
+
+        <div class="row options">
+          <label>
+            风格
+            <select id="themeSelect">
+              <option value="minimal" selected>早期极简（米色）</option>
+              <option value="night">深色夜景</option>
+              <option value="blueprint">蓝图风格</option>
+            </select>
+          </label>
+
+          <label>
+            宽度
+            <select id="widthSelect">
+              <option value="1200">1200</option>
+              <option value="1600" selected>1600</option>
+              <option value="2000">2000</option>
+            </select>
+          </label>
+
+          <button id="downloadPngBtn" disabled>下载 PNG</button>
+          <button id="downloadSvgBtn" disabled>下载 SVG</button>
+        </div>
+
+        <div class="row chips">
+          <button class="chip" data-q="福州">福州</button>
+          <button class="chip" data-q="长乐区">长乐</button>
+          <button class="chip" data-q="洛阳市">洛阳</button>
+          <button class="chip" data-q="厦门">厦门</button>
+        </div>
+      </section>
+
+      <section class="status-wrap">
+        <p id="statusText" class="status">等待输入地名...</p>
+      </section>
+
+      <section class="result">
+        <canvas id="mapCanvas"></canvas>
+      </section>
+
+      <footer class="foot">
+        <p>Data: OpenStreetMap · Geocoding: Nominatim · Query: Overpass API</p>
+      </footer>
+    </main>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
