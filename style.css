@@ -19,9 +19,9 @@ body {
 }
 
 .app {
-  max-width: 1200px;
+  max-width: 1220px;
   margin: 0 auto;
-  padding: 28px 20px 36px;
+  padding: 28px 20px 40px;
 }
 
 .hero h1 {
@@ -65,7 +65,7 @@ button {
 
 input {
   flex: 1;
-  min-width: 240px;
+  min-width: 260px;
 }
 
 button {
@@ -89,6 +89,12 @@ button:disabled {
   gap: 8px;
   color: var(--sub);
   font-size: 13px;
+}
+
+.checkbox-label input {
+  width: auto;
+  height: auto;
+  margin: 0;
 }
 
 .chip {
@@ -123,6 +129,67 @@ button:disabled {
   max-height: 80vh;
   border-radius: 8px;
   background: #f7f2e8;
+}
+
+.batch-results-wrap {
+  margin-top: 16px;
+}
+
+.batch-results-wrap h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  color: #4a4034;
+}
+
+.batch-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.batch-item {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.75);
+  padding: 10px;
+}
+
+.batch-item h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.batch-item p {
+  margin: 0 0 8px;
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.batch-item img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #d6ccb8;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.batch-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.batch-actions a {
+  text-decoration: none;
+  border: 1px solid #c9bcaa;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #3d342a;
+  background: #fff;
+}
+
+.batch-actions a:hover {
+  background: #f8f2e6;
 }
 
 .foot {
