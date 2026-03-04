@@ -338,7 +338,7 @@ function generateSvg(roadsByLayer, extent, width, height, margin, theme) {
   return svgParts.join("\n");
 }
 
-function composeVersion1Poster(mapCanvas, query) {
+function composeVersion1Poster(mapCanvas) {
   const mapW = mapCanvas.width;
   const mapH = mapCanvas.height;
   const margin = 90;
@@ -358,22 +358,6 @@ function composeVersion1Poster(mapCanvas, query) {
   for (let i = 0; i < 3; i++) {
     ctx.strokeRect(30 + i, 30 + i, poster.width - 60 - i * 2, poster.height - 60 - i * 2);
   }
-
-  const zhTitle = `${query}·城市道路`;
-  const enTitle = `${englishTitle(query)} ROAD NETWORK`;
-  const y0 = poster.height - 225;
-
-  ctx.fillStyle = "#2c2824";
-  ctx.font = "700 72px 'Noto Serif CJK SC','Noto Serif SC','PingFang SC','Microsoft YaHei',serif";
-  ctx.fillText(zhTitle, 92, y0);
-
-  ctx.fillStyle = "#524c44";
-  ctx.font = "500 34px 'Noto Sans CJK SC','PingFang SC','Microsoft YaHei',sans-serif";
-  ctx.fillText(enTitle, 96, y0 + 88);
-
-  ctx.fillStyle = "#70685c";
-  ctx.font = "400 24px 'Noto Sans CJK SC','PingFang SC','Microsoft YaHei',sans-serif";
-  ctx.fillText("Data: OpenStreetMap  |  Styled by 小聂子", 96, y0 + 132);
 
   return poster;
 }
@@ -488,7 +472,7 @@ async function renderForQuery(query) {
   setProgress(92, "道路数据已就绪，正在渲染画布");
   const { mapCanvas, svg } = buildMapCanvas(roadData, themeSelect.value, widthSelect.value);
 
-  const outputCanvas = posterModeCheckbox.checked ? composeVersion1Poster(mapCanvas, query) : mapCanvas;
+  const outputCanvas = posterModeCheckbox.checked ? composeVersion1Poster(mapCanvas) : mapCanvas;
 
   setProgress(100, `完成（来源：${overpassResult.endpoint}${usedFallback ? "，缩小范围" : ""}）`);
 
