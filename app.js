@@ -559,7 +559,10 @@ generateBtn.addEventListener("click", runSingle);
 batchBtn.addEventListener("click", runBatch);
 
 queryInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") runSingle();
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+    e.preventDefault();
+    runSingle();
+  }
 });
 
 downloadPngBtn.addEventListener("click", downloadPng);
