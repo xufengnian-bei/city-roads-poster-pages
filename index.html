@@ -10,13 +10,14 @@
     <main class="app">
       <header class="hero">
         <h1>City Roads Poster Generator</h1>
-        <p>输入地名或地址，一键生成道路地图海报，并下载 PNG / SVG。</p>
+        <p>输入地名或地址，生成道路图并下载 PNG / SVG。支持批量生成。</p>
       </header>
 
       <section class="controls">
         <div class="row">
-          <input id="queryInput" type="text" placeholder="例如：福州、长乐、洛阳、上海外滩" />
-          <button id="generateBtn">生成地图</button>
+          <input id="queryInput" type="text" placeholder="例如：福州 或 福州, 长乐, 洛阳（可逗号/换行分隔）" />
+          <button id="generateBtn">单张生成</button>
+          <button id="batchBtn">批量生成</button>
         </div>
 
         <div class="row options">
@@ -38,6 +39,11 @@
             </select>
           </label>
 
+          <label class="checkbox-label">
+            <input id="posterModeCheckbox" type="checkbox" checked />
+            自动套用版本1海报版式
+          </label>
+
           <button id="downloadPngBtn" disabled>下载 PNG</button>
           <button id="downloadSvgBtn" disabled>下载 SVG</button>
         </div>
@@ -56,6 +62,11 @@
 
       <section class="result">
         <canvas id="mapCanvas"></canvas>
+      </section>
+
+      <section class="batch-results-wrap">
+        <h2>批量结果</h2>
+        <div id="batchResults" class="batch-results"></div>
       </section>
 
       <footer class="foot">
