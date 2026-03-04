@@ -1,5 +1,8 @@
 const geocodeEndpoints = [
-  (q) => `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(q)}`,
+  (q) =>
+    `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=zh-CN&q=${encodeURIComponent(
+      q
+    )}`,
 ];
 
 const overpassEndpoints = [
@@ -79,27 +82,53 @@ const widthMap = {
 
 const queryInput = document.getElementById("queryInput");
 const generateBtn = document.getElementById("generateBtn");
+const batchBtn = document.getElementById("batchBtn");
 const downloadPngBtn = document.getElementById("downloadPngBtn");
 const downloadSvgBtn = document.getElementById("downloadSvgBtn");
 const statusText = document.getElementById("statusText");
 const canvas = document.getElementById("mapCanvas");
 const themeSelect = document.getElementById("themeSelect");
 const widthSelect = document.getElementById("widthSelect");
+const posterModeCheckbox = document.getElementById("posterModeCheckbox");
+const batchResults = document.getElementById("batchResults");
 
 let latestSvg = "";
 let latestFileBase = "map";
+let latestPngDataUrl = "";
 
 function setStatus(text) {
   statusText.textContent = text;
 }
 
+function setBusy(busy) {
+  generateBtn.disabled = busy;
+  batchBtn.disabled = busy;
+}
+
 function normalizeFileName(name) {
-  return name
-    .trim()
-    .replace(/[\\/:*?"<>|\s]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .toLowerCase() || "map";
+  return (
+    name
+      .trim()
+      .replace(/[\\/:*?"<>|\s]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .toLowerCase() || "map"
+  );
+}
+
+function parseQueries(raw) {
+  const parts = raw
+    .split(/[\n,，;；、]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...new Set(parts)];
+}
+
+function englishTitle(query) {
+  if (/^[a-zA-Z0-9\s-]+$/.test(query)) {
+    return query.toUpperCase();
+  }
+  return query.toUpperCase();
 }
 
 function expandBbox(bbox, ratio = 0.08) {
@@ -214,7 +243,9 @@ function generateSvg(roadsByLayer, extent, width, height, margin, theme) {
     const items = roadsByLayer[layerName] || [];
     const stroke = theme.line[layerName];
     const strokeWidth = widthMap[layerName];
-    svgParts.push(`<g fill="none" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round">`);
+    svgParts.push(
+      `<g fill="none" stroke="${stroke}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round">`
+    );
     for (const pts of items) {
       if (pts.length < 2) continue;
       const d = pts
@@ -232,7 +263,47 @@ function generateSvg(roadsByLayer, extent, width, height, margin, theme) {
   return svgParts.join("\n");
 }
 
-function renderMap(roadData, query, themeName, targetWidth) {
+function composeVersion1Poster(mapCanvas, query) {
+  const mapW = mapCanvas.width;
+  const mapH = mapCanvas.height;
+  const margin = 90;
+
+  const poster = document.createElement("canvas");
+  poster.width = mapW + margin * 2;
+  poster.height = mapH + margin * 2;
+  const ctx = poster.getContext("2d");
+
+  ctx.fillStyle = "#f5efe3";
+  ctx.fillRect(0, 0, poster.width, poster.height);
+
+  ctx.drawImage(mapCanvas, margin, margin);
+
+  ctx.strokeStyle = "#7d7362";
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 3; i++) {
+    ctx.strokeRect(30 + i, 30 + i, poster.width - 60 - i * 2, poster.height - 60 - i * 2);
+  }
+
+  const zhTitle = `${query}·城市道路`;
+  const enTitle = `${englishTitle(query)} ROAD NETWORK`;
+  const y0 = poster.height - 225;
+
+  ctx.fillStyle = "#2c2824";
+  ctx.font = "700 72px 'Noto Serif CJK SC','Noto Serif SC','PingFang SC','Microsoft YaHei',serif";
+  ctx.fillText(zhTitle, 92, y0);
+
+  ctx.fillStyle = "#524c44";
+  ctx.font = "500 34px 'Noto Sans CJK SC','PingFang SC','Microsoft YaHei',sans-serif";
+  ctx.fillText(enTitle, 96, y0 + 88);
+
+  ctx.fillStyle = "#70685c";
+  ctx.font = "400 24px 'Noto Sans CJK SC','PingFang SC','Microsoft YaHei',sans-serif";
+  ctx.fillText("Data: OpenStreetMap  |  Styled by 小聂子", 96, y0 + 132);
+
+  return poster;
+}
+
+function buildMapCanvas(roadData, themeName, targetWidth) {
   const { nodes, roads } = roadData;
   const extent = computeExtent(nodes, roads);
 
@@ -240,12 +311,12 @@ function renderMap(roadData, query, themeName, targetWidth) {
   const ratio = (extent.maxLat - extent.minLat) / (extent.maxLon - extent.minLon || 1e-6);
   const height = Math.max(900, Math.round(width * ratio));
   const margin = 30;
-
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-
   const theme = styleThemes[themeName] || styleThemes.minimal;
+
+  const mapCanvas = document.createElement("canvas");
+  mapCanvas.width = width;
+  mapCanvas.height = height;
+  const ctx = mapCanvas.getContext("2d");
 
   ctx.fillStyle = theme.bg;
   ctx.fillRect(0, 0, width, height);
@@ -277,6 +348,7 @@ function renderMap(roadData, query, themeName, targetWidth) {
     const roadsLayer = roadsByLayer[layerName];
     ctx.strokeStyle = theme.line[layerName];
     ctx.lineWidth = widthMap[layerName];
+
     for (const pts of roadsLayer) {
       ctx.beginPath();
       let moved = false;
@@ -293,58 +365,183 @@ function renderMap(roadData, query, themeName, targetWidth) {
     }
   }
 
-  latestSvg = generateSvg(roadsByLayer, extent, width, height, margin, theme);
-  latestFileBase = normalizeFileName(query) || "map";
-  downloadPngBtn.disabled = false;
-  downloadSvgBtn.disabled = false;
+  const svg = generateSvg(roadsByLayer, extent, width, height, margin, theme);
+  return { mapCanvas, svg };
 }
 
-async function generate() {
-  const query = queryInput.value.trim();
-  if (!query) {
+function drawToMain(sourceCanvas) {
+  canvas.width = sourceCanvas.width;
+  canvas.height = sourceCanvas.height;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(sourceCanvas, 0, 0);
+}
+
+async function renderForQuery(query) {
+  setStatus(`正在地理编码：${query}`);
+  const geo = await fetchGeocode(query);
+  if (!geo?.boundingbox) throw new Error(`未找到地名：${query}`);
+
+  const bbox = expandBbox(geo.boundingbox, 0.12);
+  setStatus(`正在拉取道路数据：${query}`);
+  const overpassQuery = buildOverpassQuery(bbox);
+  const osm = await fetchOverpass(overpassQuery);
+
+  const roadData = parseRoadData(osm.elements);
+  if (!roadData.roads.length) throw new Error(`该区域未找到道路：${query}`);
+
+  setStatus(`正在渲染：${query}`);
+  const { mapCanvas, svg } = buildMapCanvas(roadData, themeSelect.value, widthSelect.value);
+
+  const outputCanvas = posterModeCheckbox.checked ? composeVersion1Poster(mapCanvas, query) : mapCanvas;
+
+  return {
+    query,
+    roadsCount: roadData.roads.length,
+    svg,
+    outputCanvas,
+    fileBase: normalizeFileName(query),
+  };
+}
+
+function createBatchItem(result) {
+  const card = document.createElement("article");
+  card.className = "batch-item";
+
+  const title = document.createElement("h3");
+  title.textContent = result.query;
+
+  const meta = document.createElement("p");
+  meta.textContent = `道路 ${result.roadsCount} 条`;
+
+  const image = document.createElement("img");
+  image.src = result.outputCanvas.toDataURL("image/png");
+  image.alt = result.query;
+
+  const actions = document.createElement("div");
+  actions.className = "batch-actions";
+
+  const pngA = document.createElement("a");
+  pngA.href = image.src;
+  pngA.download = `${result.fileBase}.png`;
+  pngA.textContent = "下载 PNG";
+
+  const svgBlob = new Blob([result.svg], { type: "image/svg+xml;charset=utf-8" });
+  const svgUrl = URL.createObjectURL(svgBlob);
+
+  const svgA = document.createElement("a");
+  svgA.href = svgUrl;
+  svgA.download = `${result.fileBase}.svg`;
+  svgA.textContent = "下载 SVG";
+
+  actions.appendChild(pngA);
+  actions.appendChild(svgA);
+
+  card.appendChild(title);
+  card.appendChild(meta);
+  card.appendChild(image);
+  card.appendChild(actions);
+
+  return card;
+}
+
+function createBatchErrorItem(query, errorText) {
+  const card = document.createElement("article");
+  card.className = "batch-item";
+
+  const title = document.createElement("h3");
+  title.textContent = query;
+
+  const meta = document.createElement("p");
+  meta.textContent = `失败：${errorText}`;
+
+  card.appendChild(title);
+  card.appendChild(meta);
+  return card;
+}
+
+async function runSingle() {
+  const list = parseQueries(queryInput.value);
+  if (!list.length) {
     setStatus("请先输入地名或地址。");
     return;
   }
 
-  generateBtn.disabled = true;
+  const query = list[0];
+  if (list.length > 1) {
+    setStatus(`检测到多个地名，单张模式仅生成第一个：${query}`);
+  }
+
+  setBusy(true);
   downloadPngBtn.disabled = true;
   downloadSvgBtn.disabled = true;
 
   try {
-    setStatus("正在地理编码...");
-    const geo = await fetchGeocode(query);
-    if (!geo?.boundingbox) throw new Error("未找到该地名");
+    const result = await renderForQuery(query);
+    drawToMain(result.outputCanvas);
 
-    const bbox = expandBbox(geo.boundingbox, 0.12);
+    latestSvg = result.svg;
+    latestFileBase = result.fileBase;
+    latestPngDataUrl = result.outputCanvas.toDataURL("image/png");
 
-    setStatus("正在拉取道路数据（可能需要几十秒）...");
-    const overpassQuery = buildOverpassQuery(bbox);
-    const osm = await fetchOverpass(overpassQuery);
-
-    setStatus("正在渲染地图...");
-    const roadData = parseRoadData(osm.elements);
-    if (!roadData.roads.length) throw new Error("该区域未找到道路数据");
-
-    renderMap(roadData, query, themeSelect.value, widthSelect.value);
-    setStatus(`生成完成：${query}（道路 ${roadData.roads.length} 条）`);
+    downloadPngBtn.disabled = false;
+    downloadSvgBtn.disabled = false;
+    setStatus(`生成完成：${result.query}（道路 ${result.roadsCount} 条）`);
   } catch (err) {
     console.error(err);
     setStatus(`生成失败：${err.message || "未知错误"}`);
   } finally {
-    generateBtn.disabled = false;
+    setBusy(false);
   }
 }
 
+async function runBatch() {
+  const list = parseQueries(queryInput.value);
+  if (!list.length) {
+    setStatus("请先输入地名或地址（可多个）。");
+    return;
+  }
+
+  setBusy(true);
+  batchResults.innerHTML = "";
+  downloadPngBtn.disabled = true;
+  downloadSvgBtn.disabled = true;
+
+  let success = 0;
+  for (let i = 0; i < list.length; i++) {
+    const query = list[i];
+    setStatus(`批量生成中 [${i + 1}/${list.length}]：${query}`);
+
+    try {
+      const result = await renderForQuery(query);
+      const card = createBatchItem(result);
+      batchResults.appendChild(card);
+      success += 1;
+
+      if (i === 0) {
+        drawToMain(result.outputCanvas);
+        latestSvg = result.svg;
+        latestFileBase = result.fileBase;
+        latestPngDataUrl = result.outputCanvas.toDataURL("image/png");
+        downloadPngBtn.disabled = false;
+        downloadSvgBtn.disabled = false;
+      }
+    } catch (err) {
+      console.error(err);
+      batchResults.appendChild(createBatchErrorItem(query, err.message || "未知错误"));
+    }
+  }
+
+  setStatus(`批量完成：成功 ${success}/${list.length}`);
+  setBusy(false);
+}
+
 function downloadPng() {
-  canvas.toBlob((blob) => {
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${latestFileBase}.png`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, "image/png");
+  if (!latestPngDataUrl) return;
+  const a = document.createElement("a");
+  a.href = latestPngDataUrl;
+  a.download = `${latestFileBase}.png`;
+  a.click();
 }
 
 function downloadSvg() {
@@ -358,9 +555,11 @@ function downloadSvg() {
   URL.revokeObjectURL(url);
 }
 
-generateBtn.addEventListener("click", generate);
+generateBtn.addEventListener("click", runSingle);
+batchBtn.addEventListener("click", runBatch);
+
 queryInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") generate();
+  if (e.key === "Enter") runSingle();
 });
 
 downloadPngBtn.addEventListener("click", downloadPng);
@@ -369,6 +568,6 @@ downloadSvgBtn.addEventListener("click", downloadSvg);
 document.querySelectorAll(".chip").forEach((btn) => {
   btn.addEventListener("click", () => {
     queryInput.value = btn.dataset.q || "";
-    generate();
+    runSingle();
   });
 });
