@@ -86,6 +86,9 @@ const batchBtn = document.getElementById("batchBtn");
 const downloadPngBtn = document.getElementById("downloadPngBtn");
 const downloadSvgBtn = document.getElementById("downloadSvgBtn");
 const statusText = document.getElementById("statusText");
+const statusDetail = document.getElementById("statusDetail");
+const progressWrap = document.getElementById("progressWrap");
+const progressBar = document.getElementById("progressBar");
 const canvas = document.getElementById("mapCanvas");
 const themeSelect = document.getElementById("themeSelect");
 const widthSelect = document.getElementById("widthSelect");
@@ -98,6 +101,22 @@ let latestPngDataUrl = "";
 
 function setStatus(text) {
   statusText.textContent = text;
+}
+
+function setDetail(text = "") {
+  if (statusDetail) statusDetail.textContent = text;
+}
+
+function setProgress(percent, detail = "") {
+  const safe = Math.max(0, Math.min(100, Math.round(percent)));
+  if (progressWrap) progressWrap.hidden = false;
+  if (progressBar) progressBar.style.width = `${safe}%`;
+  if (detail) setDetail(detail);
+}
+
+function hideProgress() {
+  if (progressWrap) progressWrap.hidden = true;
+  if (progressBar) progressBar.style.width = "0%";
 }
 
 function setBusy(busy) {
@@ -142,6 +161,14 @@ function expandBbox(bbox, ratio = 0.08) {
   return [south, north, west, east];
 }
 
+function shrinkBbox([south, north, west, east], factor = 0.72) {
+  const cLat = (south + north) / 2;
+  const cLon = (west + east) / 2;
+  const halfLat = ((north - south) * factor) / 2;
+  const halfLon = ((east - west) * factor) / 2;
+  return [cLat - halfLat, cLat + halfLat, cLon - halfLon, cLon + halfLon];
+}
+
 async function fetchGeocode(query) {
   let lastError = null;
   for (const builder of geocodeEndpoints) {
@@ -160,24 +187,72 @@ async function fetchGeocode(query) {
   throw lastError || new Error("地理编码失败");
 }
 
-async function fetchOverpass(query) {
-  let lastError = null;
-  for (const endpoint of overpassEndpoints) {
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-        body: new URLSearchParams({ data: query }),
-      });
-      if (!res.ok) throw new Error(`Overpass ${res.status}`);
-      const data = await res.json();
-      if (!data || !Array.isArray(data.elements)) throw new Error("Overpass返回异常");
-      return data;
-    } catch (err) {
-      lastError = err;
+async function fetchWithTimeout(url, options = {}, timeoutMs = 60000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchOverpass(query, onProgress = () => {}) {
+  const errors = [];
+
+  for (let index = 0; index < overpassEndpoints.length; index++) {
+    const endpoint = overpassEndpoints[index];
+    const label = endpoint.replace("https://", "");
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const phaseBase = 30 + index * 20 + (attempt - 1) * 8;
+      onProgress(phaseBase, `正在请求 ${label}（第${attempt}次）`);
+
+      let spinner = null;
+      try {
+        let spin = phaseBase;
+        spinner = setInterval(() => {
+          spin = Math.min(phaseBase + 6, spin + 1);
+          onProgress(spin, `正在等待 ${label} 响应...`);
+        }, 900);
+
+        const res = await fetchWithTimeout(
+          endpoint,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+            body: new URLSearchParams({ data: query }),
+          },
+          55000
+        );
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        onProgress(phaseBase + 7, `正在解析 ${label} 返回数据`);
+        const data = await res.json();
+
+        if (!data || !Array.isArray(data.elements)) {
+          throw new Error("返回结构异常");
+        }
+
+        if (data.elements.length === 0) {
+          throw new Error("返回空数据");
+        }
+
+        onProgress(85, `道路数据已获取（来源：${label}）`);
+        return { data, endpoint: label };
+      } catch (error) {
+        const message = error?.name === "AbortError" ? "请求超时" : (error?.message || "未知错误");
+        errors.push(`${label}#${attempt}: ${message}`);
+      } finally {
+        if (spinner) clearInterval(spinner);
+      }
     }
   }
-  throw lastError || new Error("Overpass查询失败");
+
+  throw new Error(`Overpass 查询失败：${errors.join("；")}`);
 }
 
 function buildOverpassQuery([south, north, west, east]) {
@@ -379,21 +454,43 @@ function drawToMain(sourceCanvas) {
 
 async function renderForQuery(query) {
   setStatus(`正在地理编码：${query}`);
+  setProgress(8, "地理编码请求中");
   const geo = await fetchGeocode(query);
   if (!geo?.boundingbox) throw new Error(`未找到地名：${query}`);
 
   const bbox = expandBbox(geo.boundingbox, 0.12);
-  setStatus(`正在拉取道路数据：${query}`);
   const overpassQuery = buildOverpassQuery(bbox);
-  const osm = await fetchOverpass(overpassQuery);
 
-  const roadData = parseRoadData(osm.elements);
+  setStatus(`正在拉取道路数据：${query}`);
+  setProgress(22, "已获取地理范围，开始请求道路数据");
+
+  let overpassResult;
+  let usedFallback = false;
+
+  try {
+    overpassResult = await fetchOverpass(overpassQuery, setProgress);
+  } catch (firstError) {
+    usedFallback = true;
+    setProgress(55, "主范围请求失败，尝试缩小范围重试...");
+    const smaller = shrinkBbox(bbox, 0.68);
+    const fallbackQuery = buildOverpassQuery(smaller);
+    try {
+      overpassResult = await fetchOverpass(fallbackQuery, setProgress);
+    } catch (secondError) {
+      throw new Error(`${firstError.message} | 缩小范围后仍失败：${secondError.message}`);
+    }
+  }
+
+  const roadData = parseRoadData(overpassResult.data.elements);
   if (!roadData.roads.length) throw new Error(`该区域未找到道路：${query}`);
 
   setStatus(`正在渲染：${query}`);
+  setProgress(92, "道路数据已就绪，正在渲染画布");
   const { mapCanvas, svg } = buildMapCanvas(roadData, themeSelect.value, widthSelect.value);
 
   const outputCanvas = posterModeCheckbox.checked ? composeVersion1Poster(mapCanvas, query) : mapCanvas;
+
+  setProgress(100, `完成（来源：${overpassResult.endpoint}${usedFallback ? "，缩小范围" : ""}）`);
 
   return {
     query,
@@ -401,6 +498,8 @@ async function renderForQuery(query) {
     svg,
     outputCanvas,
     fileBase: normalizeFileName(query),
+    endpoint: overpassResult.endpoint,
+    usedFallback,
   };
 }
 
@@ -464,6 +563,8 @@ async function runSingle() {
   const list = parseQueries(queryInput.value);
   if (!list.length) {
     setStatus("请先输入地名或地址。");
+    setDetail("");
+    hideProgress();
     return;
   }
 
@@ -487,11 +588,14 @@ async function runSingle() {
     downloadPngBtn.disabled = false;
     downloadSvgBtn.disabled = false;
     setStatus(`生成完成：${result.query}（道路 ${result.roadsCount} 条）`);
+    setDetail(`数据来源：${result.endpoint}${result.usedFallback ? "（已缩小范围重试）" : ""}`);
   } catch (err) {
     console.error(err);
     setStatus(`生成失败：${err.message || "未知错误"}`);
+    setDetail("建议：稍后重试，或改成更具体地名（如加上“区/市”）。");
   } finally {
     setBusy(false);
+    setTimeout(() => hideProgress(), 900);
   }
 }
 
@@ -499,6 +603,8 @@ async function runBatch() {
   const list = parseQueries(queryInput.value);
   if (!list.length) {
     setStatus("请先输入地名或地址（可多个）。");
+    setDetail("");
+    hideProgress();
     return;
   }
 
@@ -510,7 +616,9 @@ async function runBatch() {
   let success = 0;
   for (let i = 0; i < list.length; i++) {
     const query = list[i];
+    const overall = Math.round((i / list.length) * 100);
     setStatus(`批量生成中 [${i + 1}/${list.length}]：${query}`);
+    setProgress(overall, `当前任务：${query}`);
 
     try {
       const result = await renderForQuery(query);
@@ -532,8 +640,11 @@ async function runBatch() {
     }
   }
 
+  setProgress(100, `批量完成：成功 ${success}/${list.length}`);
   setStatus(`批量完成：成功 ${success}/${list.length}`);
+  setDetail("如有失败项，可单独重试该地名。");
   setBusy(false);
+  setTimeout(() => hideProgress(), 1200);
 }
 
 function downloadPng() {
