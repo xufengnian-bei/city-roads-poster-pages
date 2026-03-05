@@ -94,10 +94,17 @@ const themeSelect = document.getElementById("themeSelect");
 const widthSelect = document.getElementById("widthSelect");
 const detailLevelSelect = document.getElementById("detailLevelSelect");
 const posterModeCheckbox = document.getElementById("posterModeCheckbox");
+const clearCacheBtn = document.getElementById("clearCacheBtn");
+const cacheStat = document.getElementById("cacheStat");
 const batchResults = document.getElementById("batchResults");
 
 const overpassMemoryCache = new Map();
 const overpassCacheTtlMs = 10 * 60 * 1000;
+const overpassPersistentCacheTtlMs = 24 * 60 * 60 * 1000;
+const overpassCacheStorageKey = "cityRoadsOverpassCacheV1";
+const overpassPersistentMaxEntries = 18;
+const overpassPersistentMaxBytes = 2 * 1024 * 1024;
+const overpassPersistentMaxEntryBytes = 350 * 1024;
 
 const detailProfiles = {
   fast: {
@@ -198,18 +205,129 @@ function buildCacheKey(bbox, detailLevel) {
   return [detailLevel, ...bbox.map(roundCoord)].join("|");
 }
 
+function formatCacheCount() {
+  return `缓存 ${overpassMemoryCache.size} 条`;
+}
+
+function updateCacheStat() {
+  if (cacheStat) cacheStat.textContent = formatCacheCount();
+}
+
+function getLocalStorageSafe() {
+  try {
+    return window.localStorage;
+  } catch (_error) {
+    return null;
+  }
+}
+
 function getCachedOverpass(cacheKey) {
   const cached = overpassMemoryCache.get(cacheKey);
   if (!cached) return null;
-  if (Date.now() - cached.time > overpassCacheTtlMs) {
+
+  const ageMs = Date.now() - cached.time;
+  if (cached.source !== "local" && ageMs > overpassCacheTtlMs && ageMs <= overpassPersistentCacheTtlMs) {
+    cached.source = "local";
+    overpassMemoryCache.set(cacheKey, cached);
+    persistOverpassCache();
+    return cached;
+  }
+
+  const ttlMs = cached.source === "local" ? overpassPersistentCacheTtlMs : overpassCacheTtlMs;
+  if (ageMs > ttlMs) {
     overpassMemoryCache.delete(cacheKey);
+    updateCacheStat();
+    persistOverpassCache();
     return null;
   }
-  return cached.value;
+  return cached;
 }
 
-function setCachedOverpass(cacheKey, value) {
-  overpassMemoryCache.set(cacheKey, { time: Date.now(), value });
+function persistOverpassCache() {
+  const storage = getLocalStorageSafe();
+  if (!storage) return;
+
+  try {
+    const now = Date.now();
+    const entries = [...overpassMemoryCache.entries()]
+      .filter(([, item]) => now - item.time <= overpassPersistentCacheTtlMs)
+      .sort((a, b) => b[1].time - a[1].time)
+      .slice(0, overpassPersistentMaxEntries)
+      .map(([key, item]) => ({ key, time: item.time, value: item.value }));
+
+    const kept = [];
+    let totalBytes = 0;
+
+    for (const entry of entries) {
+      const encoded = JSON.stringify(entry);
+      const entryBytes = encoded.length;
+      if (entryBytes > overpassPersistentMaxEntryBytes) continue;
+      if (totalBytes + entryBytes > overpassPersistentMaxBytes) continue;
+      kept.push(entry);
+      totalBytes += entryBytes;
+    }
+
+    storage.setItem(
+      overpassCacheStorageKey,
+      JSON.stringify({
+        version: 1,
+        savedAt: now,
+        entries: kept,
+      })
+    );
+  } catch (_error) {
+  }
+}
+
+function hydrateOverpassCache() {
+  const storage = getLocalStorageSafe();
+  if (!storage) {
+    updateCacheStat();
+    return;
+  }
+
+  try {
+    const raw = storage.getItem(overpassCacheStorageKey);
+    if (!raw) {
+      updateCacheStat();
+      return;
+    }
+
+    const parsed = JSON.parse(raw);
+    const items = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    const now = Date.now();
+
+    for (const item of items) {
+      if (!item?.key || !item?.time || !item?.value?.data) continue;
+      if (now - item.time > overpassPersistentCacheTtlMs) continue;
+      overpassMemoryCache.set(item.key, {
+        time: item.time,
+        value: item.value,
+        source: "local",
+      });
+    }
+  } catch (_error) {
+  }
+
+  updateCacheStat();
+}
+
+function setCachedOverpass(cacheKey, value, source = "memory") {
+  overpassMemoryCache.set(cacheKey, { time: Date.now(), value, source });
+  updateCacheStat();
+  persistOverpassCache();
+}
+
+function clearOverpassCache() {
+  overpassMemoryCache.clear();
+  const storage = getLocalStorageSafe();
+  if (storage) {
+    try {
+      storage.removeItem(overpassCacheStorageKey);
+    } catch (_error) {
+    }
+  }
+  updateCacheStat();
 }
 
 function expandBbox(bbox, ratio = 0.08) {
@@ -537,7 +655,8 @@ async function renderForQuery(query) {
         cacheHit = true;
         areaModeUsed = true;
         areaMatchedName = areaName;
-        overpassResult = { data: areaCached.data, endpoint: `${areaCached.endpoint}（缓存）` };
+        const cacheLabel = areaCached.source === "local" ? "本地缓存" : "缓存";
+        overpassResult = { data: areaCached.value.data, endpoint: `${areaCached.value.endpoint}（${cacheLabel}）` };
         setProgress(82, `命中城市名缓存：${areaName}`);
         break;
       }
@@ -575,7 +694,8 @@ async function renderForQuery(query) {
     const cached = getCachedOverpass(cacheKey);
     if (cached) {
       cacheHit = true;
-      overpassResult = { data: cached.data, endpoint: `${cached.endpoint}（缓存）` };
+      const cacheLabel = cached.source === "local" ? "本地缓存" : "缓存";
+      overpassResult = { data: cached.value.data, endpoint: `${cached.value.endpoint}（${cacheLabel}）` };
       setProgress(84, "命中缓存，跳过远程拉取");
     } else {
       const overpassQuery = buildOverpassQuery(bbox, detailLevel);
@@ -590,7 +710,8 @@ async function renderForQuery(query) {
         const fallbackCached = getCachedOverpass(fallbackKey);
         if (fallbackCached) {
           cacheHit = true;
-          overpassResult = { data: fallbackCached.data, endpoint: `${fallbackCached.endpoint}（缓存）` };
+          const cacheLabel = fallbackCached.source === "local" ? "本地缓存" : "缓存";
+          overpassResult = { data: fallbackCached.value.data, endpoint: `${fallbackCached.value.endpoint}（${cacheLabel}）` };
           setProgress(84, "命中缩小范围缓存，跳过远程拉取");
         } else {
           const fallbackQuery = buildOverpassQuery(smaller, detailLevel);
@@ -718,7 +839,7 @@ async function runSingle() {
     setStatus(`生成完成：${result.query}（道路 ${result.roadsCount} 条）`);
     const speedLabel = result.detailLevel === "fast" ? "快速" : result.detailLevel === "standard" ? "标准" : "精细";
     const areaLabel = result.areaModeUsed ? `｜城市名直查：${result.areaMatchedName || "是"}` : "";
-    setDetail(`来源：${result.endpoint}${result.cacheHit ? "（缓存）" : ""}${result.usedFallback ? "（已缩小范围重试）" : ""}${areaLabel}｜模式：${speedLabel}`);
+    setDetail(`来源：${result.endpoint}${result.usedFallback ? "（已缩小范围重试）" : ""}${areaLabel}｜模式：${speedLabel}`);
   } catch (err) {
     console.error(err);
     setStatus(`生成失败：${err.message || "未知错误"}`);
@@ -815,3 +936,12 @@ document.querySelectorAll(".chip").forEach((btn) => {
     runSingle();
   });
 });
+
+if (clearCacheBtn) {
+  clearCacheBtn.addEventListener("click", () => {
+    clearOverpassCache();
+    setDetail("已清理本地缓存。后续将重新请求地图数据。");
+  });
+}
+
+hydrateOverpassCache();
