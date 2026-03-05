@@ -7,8 +7,8 @@ const geocodeEndpoints = [
 
 const overpassEndpoints = [
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
   "https://overpass.openstreetmap.fr/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
 ];
 
 const styleThemes = {
@@ -172,6 +172,24 @@ function englishTitle(query) {
   return query.toUpperCase();
 }
 
+function isLikelyPlaceName(query) {
+  const text = query.trim();
+  if (!text) return false;
+  if (/\d/.test(text)) return false;
+  if (/[,，;；]/.test(text)) return false;
+  if (/\b(road|street|avenue|lane|号|室|楼|大道|路|街)\b/i.test(text)) return false;
+  return text.length <= 12;
+}
+
+function buildAreaNameCandidates(query) {
+  const text = query.trim();
+  const candidates = [text];
+  if (!text.endsWith("市")) candidates.push(`${text}市`);
+  if (!text.endsWith("区")) candidates.push(`${text}区`);
+  if (!text.endsWith("县")) candidates.push(`${text}县`);
+  return [...new Set(candidates)];
+}
+
 function roundCoord(value) {
   return Number(value).toFixed(4);
 }
@@ -241,14 +259,17 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 60000) {
   }
 }
 
-async function fetchOverpass(query, onProgress = () => {}) {
+async function fetchOverpass(query, onProgress = () => {}, options = {}) {
   const errors = [];
+  const endpoints = options.endpoints || overpassEndpoints;
+  const attempts = options.attempts ?? 2;
+  const timeoutMs = options.timeoutMs ?? 55000;
 
-  for (let index = 0; index < overpassEndpoints.length; index++) {
-    const endpoint = overpassEndpoints[index];
+  for (let index = 0; index < endpoints.length; index++) {
+    const endpoint = endpoints[index];
     const label = endpoint.replace("https://", "");
 
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
       const phaseBase = 30 + index * 20 + (attempt - 1) * 8;
       onProgress(phaseBase, `正在请求 ${label}（第${attempt}次）`);
 
@@ -267,7 +288,7 @@ async function fetchOverpass(query, onProgress = () => {}) {
             headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
             body: new URLSearchParams({ data: query }),
           },
-          55000
+          timeoutMs
         );
 
         if (!res.ok) {
@@ -302,6 +323,12 @@ async function fetchOverpass(query, onProgress = () => {}) {
 function buildOverpassQuery([south, north, west, east], detailLevel = "fast") {
   const profile = detailProfiles[detailLevel] || detailProfiles.fast;
   return `[out:json][timeout:${profile.timeoutSec}];\n(\n  way["highway"~"${profile.regex}"](${south},${west},${north},${east});\n);\nout body;\n>;\nout skel qt;`;
+}
+
+function buildOverpassAreaQuery(areaName, detailLevel = "fast") {
+  const profile = detailProfiles[detailLevel] || detailProfiles.fast;
+  const safeName = areaName.replace(/"/g, '\\"');
+  return `[out:json][timeout:${profile.timeoutSec}];\narea["name"="${safeName}"]["boundary"="administrative"]->.a;\n(\n  way["highway"~"${profile.regex}"](area.a);\n);\nout body;\n>;\nout skel qt;`;
 }
 
 function parseRoadData(elements) {
@@ -482,50 +509,91 @@ function drawToMain(sourceCanvas) {
 }
 
 async function renderForQuery(query) {
-  setStatus(`正在地理编码：${query}`);
-  setProgress(8, "地理编码请求中");
-  const geo = await fetchGeocode(query);
-  if (!geo?.boundingbox) throw new Error(`未找到地名：${query}`);
-
   const detailLevel = detailLevelSelect?.value || "fast";
   const profile = detailProfiles[detailLevel] || detailProfiles.fast;
-  const bbox = expandBbox(geo.boundingbox, profile.bboxRatio);
-  const cacheKey = buildCacheKey(bbox, detailLevel);
 
-  setStatus(`正在拉取道路数据：${query}`);
-  setProgress(22, `已获取地理范围，开始请求道路数据（${detailLevel === "fast" ? "快速" : detailLevel === "standard" ? "标准" : "精细"}）`);
+  setStatus(`正在准备数据：${query}`);
+  setProgress(8, "初始化请求");
 
   let overpassResult;
   let usedFallback = false;
   let cacheHit = false;
+  let areaModeUsed = false;
+  let areaMatchedName = "";
 
-  const cached = getCachedOverpass(cacheKey);
-  if (cached) {
-    cacheHit = true;
-    overpassResult = { data: cached.data, endpoint: `${cached.endpoint}（缓存）` };
-    setProgress(84, "命中缓存，跳过远程拉取");
-  } else {
-    const overpassQuery = buildOverpassQuery(bbox, detailLevel);
-    try {
-      overpassResult = await fetchOverpass(overpassQuery, setProgress);
-      setCachedOverpass(cacheKey, { data: overpassResult.data, endpoint: overpassResult.endpoint });
-    } catch (firstError) {
-      usedFallback = true;
-      setProgress(55, "主范围请求失败，尝试缩小范围重试...");
-      const smaller = shrinkBbox(bbox, 0.68);
-      const fallbackKey = buildCacheKey(smaller, detailLevel);
-      const fallbackCached = getCachedOverpass(fallbackKey);
-      if (fallbackCached) {
+  if (isLikelyPlaceName(query)) {
+    setProgress(14, "城市名模式：优先直查行政区道路");
+    const areaCandidates = buildAreaNameCandidates(query);
+    for (const areaName of areaCandidates) {
+      const areaKey = `area|${detailLevel}|${areaName}`;
+      const areaCached = getCachedOverpass(areaKey);
+      if (areaCached) {
         cacheHit = true;
-        overpassResult = { data: fallbackCached.data, endpoint: `${fallbackCached.endpoint}（缓存）` };
-        setProgress(84, "命中缩小范围缓存，跳过远程拉取");
-      } else {
-        const fallbackQuery = buildOverpassQuery(smaller, detailLevel);
-        try {
-          overpassResult = await fetchOverpass(fallbackQuery, setProgress);
-          setCachedOverpass(fallbackKey, { data: overpassResult.data, endpoint: overpassResult.endpoint });
-        } catch (secondError) {
-          throw new Error(`${firstError.message} | 缩小范围后仍失败：${secondError.message}`);
+        areaModeUsed = true;
+        areaMatchedName = areaName;
+        overpassResult = { data: areaCached.data, endpoint: `${areaCached.endpoint}（缓存）` };
+        setProgress(82, `命中城市名缓存：${areaName}`);
+        break;
+      }
+
+      try {
+        const areaQuery = buildOverpassAreaQuery(areaName, detailLevel);
+        const areaFetched = await fetchOverpass(areaQuery, setProgress, {
+          endpoints: overpassEndpoints.slice(0, 2),
+          attempts: 1,
+          timeoutMs: 22000,
+        });
+        setCachedOverpass(areaKey, { data: areaFetched.data, endpoint: areaFetched.endpoint });
+        overpassResult = areaFetched;
+        areaModeUsed = true;
+        areaMatchedName = areaName;
+        setProgress(84, `城市名模式命中：${areaName}`);
+        break;
+      } catch (_areaError) {
+      }
+    }
+  }
+
+  if (!overpassResult) {
+    setStatus(`正在地理编码：${query}`);
+    setProgress(18, "地理编码请求中");
+    const geo = await fetchGeocode(query);
+    if (!geo?.boundingbox) throw new Error(`未找到地名：${query}`);
+
+    const bbox = expandBbox(geo.boundingbox, profile.bboxRatio);
+    const cacheKey = buildCacheKey(bbox, detailLevel);
+
+    setStatus(`正在拉取道路数据：${query}`);
+    setProgress(22, `已获取地理范围，开始请求道路数据（${detailLevel === "fast" ? "快速" : detailLevel === "standard" ? "标准" : "精细"}）`);
+
+    const cached = getCachedOverpass(cacheKey);
+    if (cached) {
+      cacheHit = true;
+      overpassResult = { data: cached.data, endpoint: `${cached.endpoint}（缓存）` };
+      setProgress(84, "命中缓存，跳过远程拉取");
+    } else {
+      const overpassQuery = buildOverpassQuery(bbox, detailLevel);
+      try {
+        overpassResult = await fetchOverpass(overpassQuery, setProgress);
+        setCachedOverpass(cacheKey, { data: overpassResult.data, endpoint: overpassResult.endpoint });
+      } catch (firstError) {
+        usedFallback = true;
+        setProgress(55, "主范围请求失败，尝试缩小范围重试...");
+        const smaller = shrinkBbox(bbox, 0.68);
+        const fallbackKey = buildCacheKey(smaller, detailLevel);
+        const fallbackCached = getCachedOverpass(fallbackKey);
+        if (fallbackCached) {
+          cacheHit = true;
+          overpassResult = { data: fallbackCached.data, endpoint: `${fallbackCached.endpoint}（缓存）` };
+          setProgress(84, "命中缩小范围缓存，跳过远程拉取");
+        } else {
+          const fallbackQuery = buildOverpassQuery(smaller, detailLevel);
+          try {
+            overpassResult = await fetchOverpass(fallbackQuery, setProgress);
+            setCachedOverpass(fallbackKey, { data: overpassResult.data, endpoint: overpassResult.endpoint });
+          } catch (secondError) {
+            throw new Error(`${firstError.message} | 缩小范围后仍失败：${secondError.message}`);
+          }
         }
       }
     }
@@ -552,6 +620,8 @@ async function renderForQuery(query) {
     usedFallback,
     cacheHit,
     detailLevel,
+    areaModeUsed,
+    areaMatchedName,
   };
 }
 
@@ -641,7 +711,8 @@ async function runSingle() {
     downloadSvgBtn.disabled = false;
     setStatus(`生成完成：${result.query}（道路 ${result.roadsCount} 条）`);
     const speedLabel = result.detailLevel === "fast" ? "快速" : result.detailLevel === "standard" ? "标准" : "精细";
-    setDetail(`来源：${result.endpoint}${result.cacheHit ? "（缓存）" : ""}${result.usedFallback ? "（已缩小范围重试）" : ""}｜模式：${speedLabel}`);
+    const areaLabel = result.areaModeUsed ? `｜城市名直查：${result.areaMatchedName || "是"}` : "";
+    setDetail(`来源：${result.endpoint}${result.cacheHit ? "（缓存）" : ""}${result.usedFallback ? "（已缩小范围重试）" : ""}${areaLabel}｜模式：${speedLabel}`);
   } catch (err) {
     console.error(err);
     setStatus(`生成失败：${err.message || "未知错误"}`);
