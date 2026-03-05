@@ -96,6 +96,12 @@ button:disabled {
   font-size: 13px;
 }
 
+.cache-stat {
+  color: var(--sub);
+  font-size: 12px;
+  padding: 0 2px;
+}
+
 .checkbox-label input {
   width: auto;
   height: auto;
@@ -272,7 +278,8 @@ button:disabled {
   .query-row button,
   .options button,
   .options label,
-  .options select {
+  .options select,
+  .cache-stat {
     width: 100%;
   }
 
@@ -288,6 +295,11 @@ button:disabled {
     border-radius: 10px;
     padding: 8px 10px;
     min-height: 40px;
+  }
+
+  .cache-stat {
+    text-align: right;
+    padding: 0 2px;
   }
 
   .checkbox-label {
