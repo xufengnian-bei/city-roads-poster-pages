@@ -92,8 +92,30 @@ const progressBar = document.getElementById("progressBar");
 const canvas = document.getElementById("mapCanvas");
 const themeSelect = document.getElementById("themeSelect");
 const widthSelect = document.getElementById("widthSelect");
+const detailLevelSelect = document.getElementById("detailLevelSelect");
 const posterModeCheckbox = document.getElementById("posterModeCheckbox");
 const batchResults = document.getElementById("batchResults");
+
+const overpassMemoryCache = new Map();
+const overpassCacheTtlMs = 10 * 60 * 1000;
+
+const detailProfiles = {
+  fast: {
+    regex: "^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|residential|unclassified|service|road)$",
+    timeoutSec: 75,
+    bboxRatio: 0.07,
+  },
+  standard: {
+    regex: "^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|residential|unclassified|living_street|service|road|track|path|footway|pedestrian|cycleway|steps)$",
+    timeoutSec: 110,
+    bboxRatio: 0.10,
+  },
+  fine: {
+    regex: ".*",
+    timeoutSec: 140,
+    bboxRatio: 0.13,
+  },
+};
 
 let latestSvg = "";
 let latestFileBase = "map";
@@ -148,6 +170,28 @@ function englishTitle(query) {
     return query.toUpperCase();
   }
   return query.toUpperCase();
+}
+
+function roundCoord(value) {
+  return Number(value).toFixed(4);
+}
+
+function buildCacheKey(bbox, detailLevel) {
+  return [detailLevel, ...bbox.map(roundCoord)].join("|");
+}
+
+function getCachedOverpass(cacheKey) {
+  const cached = overpassMemoryCache.get(cacheKey);
+  if (!cached) return null;
+  if (Date.now() - cached.time > overpassCacheTtlMs) {
+    overpassMemoryCache.delete(cacheKey);
+    return null;
+  }
+  return cached.value;
+}
+
+function setCachedOverpass(cacheKey, value) {
+  overpassMemoryCache.set(cacheKey, { time: Date.now(), value });
 }
 
 function expandBbox(bbox, ratio = 0.08) {
@@ -255,8 +299,9 @@ async function fetchOverpass(query, onProgress = () => {}) {
   throw new Error(`Overpass 查询失败：${errors.join("；")}`);
 }
 
-function buildOverpassQuery([south, north, west, east]) {
-  return `[out:json][timeout:120];\n(\n  way["highway"](${south},${west},${north},${east});\n);\n(._;>;);\nout body;`;
+function buildOverpassQuery([south, north, west, east], detailLevel = "fast") {
+  const profile = detailProfiles[detailLevel] || detailProfiles.fast;
+  return `[out:json][timeout:${profile.timeoutSec}];\n(\n  way["highway"~"${profile.regex}"](${south},${west},${north},${east});\n);\nout body;\n>;\nout skel qt;`;
 }
 
 function parseRoadData(elements) {
@@ -442,26 +487,47 @@ async function renderForQuery(query) {
   const geo = await fetchGeocode(query);
   if (!geo?.boundingbox) throw new Error(`未找到地名：${query}`);
 
-  const bbox = expandBbox(geo.boundingbox, 0.12);
-  const overpassQuery = buildOverpassQuery(bbox);
+  const detailLevel = detailLevelSelect?.value || "fast";
+  const profile = detailProfiles[detailLevel] || detailProfiles.fast;
+  const bbox = expandBbox(geo.boundingbox, profile.bboxRatio);
+  const cacheKey = buildCacheKey(bbox, detailLevel);
 
   setStatus(`正在拉取道路数据：${query}`);
-  setProgress(22, "已获取地理范围，开始请求道路数据");
+  setProgress(22, `已获取地理范围，开始请求道路数据（${detailLevel === "fast" ? "快速" : detailLevel === "standard" ? "标准" : "精细"}）`);
 
   let overpassResult;
   let usedFallback = false;
+  let cacheHit = false;
 
-  try {
-    overpassResult = await fetchOverpass(overpassQuery, setProgress);
-  } catch (firstError) {
-    usedFallback = true;
-    setProgress(55, "主范围请求失败，尝试缩小范围重试...");
-    const smaller = shrinkBbox(bbox, 0.68);
-    const fallbackQuery = buildOverpassQuery(smaller);
+  const cached = getCachedOverpass(cacheKey);
+  if (cached) {
+    cacheHit = true;
+    overpassResult = { data: cached.data, endpoint: `${cached.endpoint}（缓存）` };
+    setProgress(84, "命中缓存，跳过远程拉取");
+  } else {
+    const overpassQuery = buildOverpassQuery(bbox, detailLevel);
     try {
-      overpassResult = await fetchOverpass(fallbackQuery, setProgress);
-    } catch (secondError) {
-      throw new Error(`${firstError.message} | 缩小范围后仍失败：${secondError.message}`);
+      overpassResult = await fetchOverpass(overpassQuery, setProgress);
+      setCachedOverpass(cacheKey, { data: overpassResult.data, endpoint: overpassResult.endpoint });
+    } catch (firstError) {
+      usedFallback = true;
+      setProgress(55, "主范围请求失败，尝试缩小范围重试...");
+      const smaller = shrinkBbox(bbox, 0.68);
+      const fallbackKey = buildCacheKey(smaller, detailLevel);
+      const fallbackCached = getCachedOverpass(fallbackKey);
+      if (fallbackCached) {
+        cacheHit = true;
+        overpassResult = { data: fallbackCached.data, endpoint: `${fallbackCached.endpoint}（缓存）` };
+        setProgress(84, "命中缩小范围缓存，跳过远程拉取");
+      } else {
+        const fallbackQuery = buildOverpassQuery(smaller, detailLevel);
+        try {
+          overpassResult = await fetchOverpass(fallbackQuery, setProgress);
+          setCachedOverpass(fallbackKey, { data: overpassResult.data, endpoint: overpassResult.endpoint });
+        } catch (secondError) {
+          throw new Error(`${firstError.message} | 缩小范围后仍失败：${secondError.message}`);
+        }
+      }
     }
   }
 
@@ -484,6 +550,8 @@ async function renderForQuery(query) {
     fileBase: normalizeFileName(query),
     endpoint: overpassResult.endpoint,
     usedFallback,
+    cacheHit,
+    detailLevel,
   };
 }
 
@@ -572,7 +640,8 @@ async function runSingle() {
     downloadPngBtn.disabled = false;
     downloadSvgBtn.disabled = false;
     setStatus(`生成完成：${result.query}（道路 ${result.roadsCount} 条）`);
-    setDetail(`数据来源：${result.endpoint}${result.usedFallback ? "（已缩小范围重试）" : ""}`);
+    const speedLabel = result.detailLevel === "fast" ? "快速" : result.detailLevel === "standard" ? "标准" : "精细";
+    setDetail(`来源：${result.endpoint}${result.cacheHit ? "（缓存）" : ""}${result.usedFallback ? "（已缩小范围重试）" : ""}｜模式：${speedLabel}`);
   } catch (err) {
     console.error(err);
     setStatus(`生成失败：${err.message || "未知错误"}`);
