@@ -265,55 +265,61 @@ async function fetchOverpass(query, onProgress = () => {}, options = {}) {
   const attempts = options.attempts ?? 2;
   const timeoutMs = options.timeoutMs ?? 55000;
 
-  for (let index = 0; index < endpoints.length; index++) {
-    const endpoint = endpoints[index];
+  const fetchOne = async (endpoint) => {
     const label = endpoint.replace("https://", "");
+    const res = await fetchWithTimeout(
+      endpoint,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+        body: new URLSearchParams({ data: query }),
+      },
+      timeoutMs
+    );
 
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-      const phaseBase = 30 + index * 20 + (attempt - 1) * 8;
-      onProgress(phaseBase, `正在请求 ${label}（第${attempt}次）`);
+    if (!res.ok) {
+      throw new Error(`${label}: HTTP ${res.status}`);
+    }
 
-      let spinner = null;
-      try {
-        let spin = phaseBase;
-        spinner = setInterval(() => {
-          spin = Math.min(phaseBase + 6, spin + 1);
-          onProgress(spin, `正在等待 ${label} 响应...`);
-        }, 900);
+    const data = await res.json();
+    if (!data || !Array.isArray(data.elements)) {
+      throw new Error(`${label}: 返回结构异常`);
+    }
+    if (data.elements.length === 0) {
+      throw new Error(`${label}: 返回空数据`);
+    }
 
-        const res = await fetchWithTimeout(
-          endpoint,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-            body: new URLSearchParams({ data: query }),
-          },
-          timeoutMs
-        );
+    return { data, endpoint: label };
+  };
 
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
+  for (let round = 1; round <= attempts; round++) {
+    const phaseBase = 30 + (round - 1) * 24;
+    onProgress(phaseBase, `并发请求 ${endpoints.length} 个地图节点（第${round}轮）`);
 
-        onProgress(phaseBase + 7, `正在解析 ${label} 返回数据`);
-        const data = await res.json();
+    let spin = phaseBase;
+    const spinner = setInterval(() => {
+      spin = Math.min(phaseBase + 8, spin + 1);
+      onProgress(spin, `节点竞速中，自动选择最快可用链路...`);
+    }, 900);
 
-        if (!data || !Array.isArray(data.elements)) {
-          throw new Error("返回结构异常");
-        }
+    try {
+      const raced = endpoints.map((ep) =>
+        fetchOne(ep).catch((error) => {
+          throw new Error(error?.message || "未知错误");
+        })
+      );
 
-        if (data.elements.length === 0) {
-          throw new Error("返回空数据");
-        }
-
-        onProgress(85, `道路数据已获取（来源：${label}）`);
-        return { data, endpoint: label };
-      } catch (error) {
-        const message = error?.name === "AbortError" ? "请求超时" : (error?.message || "未知错误");
-        errors.push(`${label}#${attempt}: ${message}`);
-      } finally {
-        if (spinner) clearInterval(spinner);
+      const winner = await Promise.any(raced);
+      onProgress(85, `道路数据已获取（最快节点：${winner.endpoint}）`);
+      clearInterval(spinner);
+      return winner;
+    } catch (error) {
+      clearInterval(spinner);
+      const errList = error?.errors || [error];
+      for (const e of errList) {
+        errors.push(e?.message || String(e));
       }
+      onProgress(phaseBase + 10, `第${round}轮全部失败，准备重试...`);
     }
   }
 
